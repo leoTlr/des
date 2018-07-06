@@ -1,0 +1,151 @@
+#!/usr/bin/python
+
+# http://page.math.tu-berlin.de/~kant/teaching/hess/krypto-ws2006/des.htm
+# good explanation of DES
+
+from permutation_tables import *
+
+key = 0x0e329232ea6d0d73 # 64 bit
+key2 = 0x133457799BBCDFF1
+m = 0x8787878787878787 # hex
+m2 = 0x0123456789ABCDEF
+
+def main(msg, key, decode=False):
+
+    if key.bit_length() > 64:
+        return -1
+
+    print('msg: {:0x}'.format(msg))
+    print('key: {:0x}'.format(key))
+
+    # permutate by table PC1
+    key = permutation_by_table(key, 64, PC1) # 64bit -> PC1 -> 56bit
+
+    # split up key in two halves
+    # generate the 16 round keys
+    C0 = key >> 28
+    D0 = key & (2**28-1)
+    round_keys = generate_round_keys(C0, D0) # 56bit -> PC2 -> 48bit
+
+    #msg = bin(msg)[2:].zfill(64)
+    msg = permutation_by_table(msg, 64, IP)
+    L0 = msg >> 32
+    R0 = msg & (2**32-1)
+
+    # apply thr round function 16 times in following scheme (feistel cipher):
+    L_last = L0
+    R_last = R0
+    for i in range(1,17):
+
+        if decode: # just use the round keys in reversed order
+            i = 17-i
+
+        L_round = R_last
+        R_round = L_last ^ round_function(R_last, round_keys[i])
+        L_last = L_round
+        R_last = R_round
+
+    # concatenate reversed
+    cipher_msg = (R_round<<32) + L_round
+
+    # final permutation
+    cipher_msg = permutation_by_table(cipher_msg, 64, IP_INV)
+
+    return cipher_msg
+
+
+def round_function(Ri, Ki):
+    # expand Ri from 32 to 48 bit using table E
+    Ri = permutation_by_table(Ri, 32, E)
+
+    # xor with round key
+    Ri ^= Ki
+
+    # split Ri into 8 groups of 6 bit
+    # do this by creating a bitmask of 6 bits lshifted to the position the block starts
+    # and performing Ri AND bitmask
+    # then rshift the zeroes away to get the actual 6 bit as separate block
+    Ri_blocks = [((Ri & (0b111111 << shift_val)) >> shift_val) for shift_val in (42,36,30,24,18,12,6,0)]
+
+    # interpret each block as address in different sbox
+    # located at each address (row, col) there is a 4 bit value
+    # f.e block0 = 011011
+    #   row = 01 (first and last bit) -> 1 decimal
+    #   col = 1101 (4 middle bits) -> 13 decimal
+    #   Sbox0(1,13) = 5 (0101 in bin)
+    # substitute the block with the value at address (row, col) in sbox
+    # Sbox0 for block0, Sbox1 for block1 ... Sbox7 for block7
+    for i, block in enumerate(Ri_blocks):
+        # use a combination of bitmasks, AND-operations and shifts to get the bits we need
+        # normally it would be ((mask&block)>>5)<<1 but the last bit is a 0 for sure because of the mask
+        row = ((0b100000 & block) >> 4) + (0b1 & block)
+        col = (0b011110 & block) >> 1
+
+        # sboxes are stored as one-dimensional tuple, so we need to calc the index this way
+        Ri_blocks[i] = Sboxes[i][16*row+col]
+
+    # pack the blocks together again by concatenating them
+    Ri_blocks = zip(Ri_blocks, (28,24,20,16,12,8,4,0))
+    Ri = 0
+    for block, lshift_val in Ri_blocks:
+        Ri += (block << lshift_val)
+
+    # another permutation 32bit -> 32bit
+    Ri = permutation_by_table(Ri, 32, P)
+    # round function done
+    return Ri
+
+def permutation_by_table(key, key_len, table): # TODO: without string casting
+    # get 56-bit permutation of key according to table PC1
+    key_str = bin(key)[2:].zfill(key_len)
+    perm = []
+    for pos in range(len(table)):
+        perm.append(key_str[table[pos]-1])
+    return int(''.join(perm), 2)
+
+def generate_round_keys(C0, D0):
+    # returns dict of 16 keys (one for each round)
+
+    round_keys = dict.fromkeys(range(0,17))
+    lrot_values = (1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1)
+
+    # left-rotation function
+    # leftshift by r_bits bits and concatenate everything that
+    # (after the lshift) is more than max_bits (we want 28 here)
+    # at the end i.e: lrot 1100, 1, 4 -> 1001 
+    lrot = lambda val, r_bits, max_bits: \
+    (val << r_bits%max_bits) & (2**max_bits-1) | \
+    ((val & (2**max_bits-1)) >> (max_bits-(r_bits%max_bits)))
+
+    # initial rotation
+    C0 = lrot(C0, 0, 28)
+    D0 = lrot(D0, 0, 28)
+    round_keys[0] = (C0, D0)
+
+    # create 16 more different key pairs
+    for i, rot_val in enumerate(lrot_values):
+        i+=1
+        Ci = lrot(round_keys[i-1][0], rot_val, 28)
+        Di = lrot(round_keys[i-1][1], rot_val, 28)
+        round_keys[i] = (Ci, Di)
+
+    # round_keys[1] for first round
+    #           [16] for 16th round
+    # dont need round_keys[0] anymore, remove
+    del round_keys[0]
+
+    # now form the keys from concatenated CiDi 1<=i<=16 and by apllying PC2
+    # this reduces the key length from 56 to 48 bits
+    for i, (Ci, Di) in round_keys.items():
+        Ki = (Ci << 28) + Di
+        round_keys[i] = permutation_by_table(Ki, 56, PC2)
+
+    return round_keys
+
+cipher_text = main(m2, key2)
+print('{:x}'.format(cipher_text))
+plain_text = main(cipher_text, key2, mode='decode')
+print('{:x}'.format(plain_text))
+
+def k2s(key, z=32):
+    return bin(key)[2:].zfill(z)
